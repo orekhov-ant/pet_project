@@ -1,0 +1,220 @@
+# version: "3.9"
+# ↑ Устарело для docker compose V2. Можно смело удалить.
+
+# ===== Общий блок-конфиг для Airflow (DRY через YAML-якорь) =====
+x-airflow-common: &airflow-common
+  # ↑ Определяем "пресет", чтобы не повторять одно и то же в 3 сервисах
+  image: apache/airflow:2.9.3
+  # ↑ Фиксируем версию образа
+  environment: &airflow-common-env
+    # ↑ Общие env для всех airflow-контейнеров
+    AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW__CORE__LOAD_EXAMPLES}
+    AIRFLOW__CORE__EXECUTOR: ${AIRFLOW__CORE__EXECUTOR}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN}
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ./airflow/plugins:/opt/airflow/plugins
+  user: "${AIRFLOW_UID}:0"
+  # ↑ чтобы airflow мог писать в примонтированные папки на macOS
+
+services:
+  # ↑ Группа «сервисов» (контейнеров), которые Compose будет поднимать вместе
+  postgres-data:
+    # ↑ Имя сервиса. Оно же DNS-имя внутри сети compose (к нему будут коннектиться другие контейнеры)
+    # ↑ сервис для твоих таблиц raw/staging
+    image: postgres:16
+    # ↑ Какой образ использовать. Тег :16 = Postgres 16. Если образа нет локально — будет скачан.
+
+    container_name: pg-data
+    # ↑ Необязательно, просто удобное короткое имя контейнера для команд в терминале.
+    #   Без этого Compose дал бы имя вроде spacex-dwh-project-postgres-1.
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_DATA_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_DATA_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DATA_DB}
+    # ↑ Переменные окружения, которые ожидает официальный образ Postgres.
+    #   Значения подставляются из твоего .env (подстановка ${VAR}).
+    #   Плюс: секреты/логины не хардкодим в YAML.
+
+    ports:
+      - "${POSTGRES_DATA_PORT}:5432"
+    # ↑ Проброс порта: host:container.
+    #   Левый POSTGRES_DATA_PORT — порт на твоём Mac, написан в .env файле, правый 5432 — внутри контейнера.
+    #   Если локально уже что-то слушает 5432, поменяй левую часть (например, "55432:5432").
+
+    volumes:
+      - pgdata-data:/var/lib/postgresql/data     # именованный том для персистентности
+      - ./postgres/init:/docker-entrypoint-initdb.d
+    # ↑ Монтируем локальную папку с SQL-скриптами инициализации в специальную директорию образа.
+    #   Скрипты *.sql / *.sh из /docker-entrypoint-initdb.d выполнятся ТОЛЬКО при первом старте,
+    #   когда ещё нет данных (пустой дата-каталог). Это удобно для создания схем/пользователей «с нуля».
+    # ↑ сюда положим *.sql для создания схем raw/staging (выполнится при первом старте)
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_DATA_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # ↑ Healthcheck для Docker:
+    #   - test: запускает команду оболочки (CMD-SHELL) `pg_isready` и ждёт код 0, когда Postgres готов принимать коннекты.
+    #   - interval/timeout/retries: как часто проверять, сколько ждать и сколько раз пробовать.
+    #   Статус «healthy» пригодится дальше, чтобы другие сервисы (Airflow, Spark) ждали готовности БД
+    #   через depends_on: condition: service_healthy.
+
+  # ===== Postgres для AIRFLOW (метастор) =====
+  postgres-airflow:
+    # ↑ отдельный сервис/инстанс Postgres ТОЛЬКО для метаданных Airflow
+    image: postgres:16
+    container_name: pg-airflow
+    environment:
+      POSTGRES_USER: ${POSTGRES_AF_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_AF_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_AF_DB}
+    ports:
+      - "${POSTGRES_AF_PORT}:5432"               # наружу на 5433, внутри контейнера всё равно 5432
+    volumes:
+      - pgdata-airflow:/var/lib/postgresql/data  # отдельный том (чистая изоляция)
+      - ./postgres-airflow/init:/docker-entrypoint-initdb.d
+      # ↑ обычно пусто; если нужно — можно положить расширенные настройки/индексы
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_AF_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ===== Airflow INIT (одноразово: миграции + создание админа) =====
+  airflow-init:
+    <<: *airflow-common                          # подтягиваем общий блок (образ/volumes/env)
+    container_name: airflow-init
+    depends_on:
+      postgres-airflow:
+        condition: service_healthy               # ждём, пока метастор готов
+    environment:
+      <<: *airflow-common-env
+      AIRFLOW_ADMIN_USER: ${AIRFLOW_ADMIN_USER}  # прокидываем учётку сюда
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD}
+    command: >-
+      bash -lc "
+        airflow db migrate && airflow users create --role Admin --username \"$AIRFLOW_ADMIN_USER\" --password \"$AIRFLOW_ADMIN_PASSWORD\" --firstname Admin --lastname User --email admin@example.com || true
+      "
+    restart: "no"                                 # отработал и завершился
+
+  # ===== Airflow WEBSERVER =====
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: airflow-webserver
+    depends_on:
+      postgres-airflow:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: >-
+      bash -lc "exec airflow webserver"
+    ports:
+      - "${AIRFLOW_WEBSERVER_PORT}:8080"         # UI: http://127.0.0.1:${AIRFLOW_WEBSERVER_PORT}
+    healthcheck:
+      test: ["CMD", "bash", "-lc", "curl -fsS http://127.0.0.1:8080/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 40s
+    restart: unless-stopped
+
+  # ===== Airflow SCHEDULER =====
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: airflow-scheduler
+    depends_on:
+      postgres-airflow:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    command: >-
+      bash -lc "exec airflow scheduler"
+    healthcheck:
+      # пройдёт, когда у планировщика есть «сердцебиение»
+      test: ["CMD", "bash", "-lc", "airflow jobs check --job-type SchedulerJob --limit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 40s
+    restart: unless-stopped
+
+  clickhouse:
+    # ↑ Имя сервиса — по нему к нему обратятся другие контейнеры внутри одной сети
+    image: clickhouse/clickhouse-server:24.8
+    # ↑ Официальный образ ClickHouse. Фиксируем версию (можно будет обновить позже).
+    container_name: clickhouse-dwh
+    # ↑ Удобное короткое имя контейнера для терминала
+
+    ports:
+      - "8123:8123"
+      # ↑ HTTP-интерфейс ClickHouse (REST/SQL через HTTP), удобно для быстрой проверки curl-ом
+      - "9000:9000"
+      # ↑ Нативный TCP-порт для драйверов/клиентов (clickhouse-client, Python-коннекторы)
+
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    # ↑ Рекомендуемые лимиты на количество открытых файлов — ClickHouse любит широкие лимиты
+
+    volumes:
+      - ./clickhouse/init:/docker-entrypoint-initdb.d
+      # ← init SQL сюда
+
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      # ↑ Проверяем готовность встроенным клиентом: вернёт 0-код, когда сервер отвечает
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # ↑ Параметры healthcheck: как часто и сколько попыток сделать
+
+  spark-master:
+    image: apache/spark:3.5.3
+    container_name: spark-master
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master --host spark-master
+    environment:
+      - SPARK_MASTER_HOST=spark-master
+      - SPARK_MASTER_PORT=${SPARK_MASTER_PORT:-7077}
+      - SPARK_MASTER_WEBUI_PORT=${SPARK_UI_PORT:-8080}
+    ports:
+      - "7077:7077"
+      - "8080:8080"
+    healthcheck:
+      test: [ "CMD", "bash", "-lc", "curl -fsS http://127.0.0.1:8080/ >/dev/null" ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  spark-worker:
+    image: apache/spark:3.5.3
+    container_name: spark-worker
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      - SPARK_WORKER_WEBUI_PORT=8081
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: [ "CMD", "bash", "-lc", "curl -fsS http://127.0.0.1:8081/ >/dev/null" ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  pgdata-data:     # данные твоего DWH (raw/staging)
+  pgdata-airflow:  # метаданные Airflow (изолировано)

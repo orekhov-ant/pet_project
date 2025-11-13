@@ -54,9 +54,9 @@ def upsert_by_delete(connection, latitude: float, longitude: float, record: dict
         raise ValueError("В ответе нет поля date.")
     # приводим формат времени из "2025-11-01 00:00:00" в формат объекта datetime (2025, 11, 1, 0, 0) c меткой utc
     api_dt = datetime.fromisoformat(record.get("date")).replace(tzinfo=timezone.utc)
-    with connection.cursor() as cur:
+    with connection.cursor() as curr:
         # delete целевого среза
-        cur.execute("""
+        curr.execute("""
             DELETE FROM raw.weather_per_day
             WHERE api_dt = %s AND lat = %s AND lon = %s
             """,
@@ -64,7 +64,7 @@ def upsert_by_delete(connection, latitude: float, longitude: float, record: dict
         )
 
         # insert свежих данных
-        cur.execute("""
+        curr.execute("""
             INSERT INTO raw.weather_per_day (api_dt, lat, lon, raw_payload)
             VALUES (%s, %s, %s, %s)
             """,
@@ -90,7 +90,7 @@ cities_geo = {
 }
 
 # 3. Формируем запрос api.
-target_date = "2025-11-01"
+target_date = "2025-11-02"
 base_url = "https://meteostat.p.rapidapi.com/point/daily"
 params = {
     "lat": cities_geo["moscow"][0],
@@ -139,9 +139,9 @@ with psycopg2.connect(
     password=PG_PWD
 ) as conn:
     # объект, через который выполняются sql запросы в контекстном менеджере
-    with conn.cursor() as cur:      # объект буферизует результаты и управляет состоянием запроса.
-        cur.execute("SELECT version();")
-        print("PostgreSQL версия: ", cur.fetchone()[0])    # при выходе with conn.cursor() всегда вызывается cur.close()
+    with conn.cursor() as cur_check:      # объект буферизует результаты и управляет состоянием запроса.
+        cur_check.execute("SELECT version();")
+        print("PostgreSQL версия: ", cur_check.fetchone()[0])    # при выходе with conn.cursor() всегда вызывается cur.close()
     if not isinstance(rows, list):
         raise ValueError("Структура ответа неожиданная: 'rows' не список")
     if len(rows) == 1:

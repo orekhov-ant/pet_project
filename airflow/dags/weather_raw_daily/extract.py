@@ -1,5 +1,6 @@
 # === imports ===
 import os
+import time
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -13,7 +14,6 @@ from dotenv import load_dotenv
 cities_geo = {
     "moscow": (55.7558,37.6173),
     "spb": (59.9375, 30.3086),
-    "kazan":   (55.7963, 49.1088),
 }
 
 # === helpers ===
@@ -22,7 +22,9 @@ def is_running_locally() -> bool:
     Определяет, запущен ли скрипт локально.
     """
     if Path('/.dockerenv').exists():
+        print("Запущено в docker.")
         return False
+    print("Запущено в локально.")
     return True
 
 def find_env_path(file_name: str):
@@ -42,14 +44,13 @@ def find_env_path(file_name: str):
 
 def load_project_env():
     """
-    Загружает нужный env
+    Загружает нужный .env.local если запущено локально
     """
     if is_running_locally():
         load_dotenv(dotenv_path=find_env_path(".env.local"))
         print("Загружен .env.local")
     else:
-        load_dotenv(dotenv_path=find_env_path(".env"))
-        print("Загружен .env")
+        pass    # в докере нет файла .env (он просто прочитан и переменные есть в os.environ)
 
 # === atomic EXTRACT steps ===
 def upsert_by_delete(connection, city: str, latitude: float, longitude: float, record: dict):
@@ -89,30 +90,30 @@ def extract_weather_raw_daily(target_date: str):
     :param target_date:
     :return:
     """
-    # 1. Приоритет: если есть .env.local, то подгружаем его, иначе обычный .env.
+    # 1. Приоритет: если запускаем локально, то нужен .env.local
     load_project_env()
     # 2. Переменные соединения для записи в базу.
-    API_KEY = os.getenv("METEOSTAT_API_KEY")
-    PG_HOST = os.getenv("POSTGRES_DATA_HOST")        # имя хоста по месту запуска скрипта
-    PG_PORT = int(os.getenv("POSTGRES_DATA_PORT"))
-    PG_DB = os.getenv("POSTGRES_DATA_DB")           # название БД
-    PG_USER = os.getenv("POSTGRES_DATA_USER")
-    PG_PWD = os.getenv("POSTGRES_DATA_PASSWORD")
+    api_key = os.getenv("METEOSTAT_API_KEY")
+    pg_host = os.getenv("POSTGRES_DATA_HOST")        # имя хоста по месту запуска скрипта
+    pg_port = int(os.getenv("POSTGRES_DATA_PORT"))
+    pg_db = os.getenv("POSTGRES_DATA_DB")           # название БД
+    pg_user = os.getenv("POSTGRES_DATA_USER")
+    pg_pwd = os.getenv("POSTGRES_DATA_PASSWORD")
 
     # 3. Формируем запрос api.
     base_url = "https://meteostat.p.rapidapi.com/point/daily"
     headers = {
-        "x-rapidapi-key": API_KEY,
+        "x-rapidapi-key": api_key,
         "x-rapidapi-host": "meteostat.p.rapidapi.com"
     }
 
     # 4. Открываем одно соединение для записи всех городов.
     with psycopg2.connect(
-        host=PG_HOST,
-        port=PG_PORT,
-        dbname=PG_DB,
-        user=PG_USER,
-        password=PG_PWD
+        host=pg_host,
+        port=pg_port,
+        dbname=pg_db,
+        user=pg_user,
+        password=pg_pwd
     ) as conn:
         # Цикл по имеющимся городам.
         for city_name, (lat, lon) in cities_geo.items():
@@ -125,9 +126,11 @@ def extract_weather_raw_daily(target_date: str):
             }
             # Сохраняем ответ в память.
             response = requests.get(base_url, params=params, headers=headers, timeout=10)
+            failed_cities = []  # для пропущенных городов
 
             if response.status_code != 200:
                 print(f"{city_name} Ошибка API, {response.status_code}: {response.text}.")
+                failed_cities.append((target_date, city_name))
                 continue
 
             data = response.json()
@@ -139,6 +142,7 @@ def extract_weather_raw_daily(target_date: str):
 
             if len(rows) == 0:
                 print(f"{city_name} за {target_date} нет данных, возможен временной лаг публикации или неверная дата.")
+                failed_cities.append((target_date, city_name))
                 continue
 
             if len(rows) > 1:
@@ -156,9 +160,12 @@ def extract_weather_raw_daily(target_date: str):
 
             # Записываем в базу город отдельно.
             upsert_by_delete(conn, city_name, lat, lon, row)
+            time.sleep(5)  # API возвращает ошибку когда много запросов в секунду
     # Закрываем соединение после записи всех городов.
     conn.close()
-    print("Extract завершен.")
+    if failed_cities:
+        raise RuntimeError(f"Не удалось загрузить данные для городов: {failed_cities}.")
+    print("Extract завершен успешно.")
 
 # === manual run ===
 if __name__ == "__main__":

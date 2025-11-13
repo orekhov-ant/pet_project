@@ -10,6 +10,7 @@ Icon
 .gitignore.save
 ._*
 .env
+.env.local
 
 # -------------------------
 # Python

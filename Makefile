@@ -94,7 +94,7 @@ clean-logs:
 
 # --- БД и сервисы ---
 psql-data:
-	docker exec -it pg-data psql -U de -d de_raw
+	docker exec -it pg-data psql -U postgres -d weather_raw
 
 restart-psql-data:
 	docker stop pg-data

@@ -6,6 +6,8 @@ x-airflow-common: &airflow-common
   # ↑ Определяем "пресет", чтобы не повторять одно и то же в 3 сервисах
   image: apache/airflow:2.9.3
   # ↑ Фиксируем версию образа
+  env_file:
+    - ./.env
   environment: &airflow-common-env
     # ↑ Общие env для всех airflow-контейнеров
     AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW__CORE__LOAD_EXAMPLES}

@@ -6,8 +6,6 @@ x-airflow-common: &airflow-common
   # ↑ Определяем "пресет", чтобы не повторять одно и то же в 3 сервисах
   image: apache/airflow:2.9.3
   # ↑ Фиксируем версию образа
-  env_file:
-    - ./.env
   environment: &airflow-common-env
     # ↑ Общие env для всех airflow-контейнеров
     AIRFLOW__CORE__LOAD_EXAMPLES: ${AIRFLOW__CORE__LOAD_EXAMPLES}
@@ -15,6 +13,15 @@ x-airflow-common: &airflow-common
     AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
     AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN}
+
+    # Нужно для DAG:
+    POSTGRES_DATA_USER: ${POSTGRES_DATA_USER}
+    POSTGRES_DATA_PASSWORD: ${POSTGRES_DATA_PASSWORD}
+    POSTGRES_DATA_DB: ${POSTGRES_DATA_DB}
+    POSTGRES_DATA_SCHEMA: ${POSTGRES_DATA_SCHEMA}
+    POSTGRES_DATA_PORT: ${POSTGRES_DATA_PORT}
+    POSTGRES_DATA_HOST: ${POSTGRES_DATA_HOST}
+    METEOSTAT_API_KEY: ${METEOSTAT_API_KEY}
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./airflow/logs:/opt/airflow/logs
@@ -28,7 +35,7 @@ services:
     # ↑ Имя сервиса. Оно же DNS-имя внутри сети compose (к нему будут коннектиться другие контейнеры)
     # ↑ сервис для твоих таблиц raw/staging
     image: postgres:16
-    # ↑ Какой образ использовать. Тег :16 = Postgres 16. Если образа нет локально — будет скачан.
+    # ↑ Какой образ использовать. Postgres 16. Если образа нет локально — будет скачан.
 
     container_name: pg-data
     # ↑ Необязательно, просто удобное короткое имя контейнера для команд в терминале.

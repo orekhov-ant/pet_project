@@ -42,15 +42,13 @@ def find_env_path(file_name: str):
             raise FileNotFoundError(f'{file_name} не найден')   # защита от бесконечного цикла, когда путь не обрезается
         current_dir = new_dir
 
-def load_project_env():
+def load_project_env_if_locally():
     """
-    Загружает нужный .env.local если запущено локально
+    Нужно для запуска локально. Загружает нужный .env.local
     """
     if is_running_locally():
         load_dotenv(dotenv_path=find_env_path(".env.local"))
         print("Загружен .env.local")
-    else:
-        pass    # в докере нет файла .env (он просто прочитан и переменные есть в os.environ)
 
 # === atomic EXTRACT steps ===
 def upsert_by_delete(connection, city: str, latitude: float, longitude: float, record: dict):
@@ -87,27 +85,30 @@ def upsert_by_delete(connection, city: str, latitude: float, longitude: float, r
 def extract_weather_raw_daily(target_date: str):
     """
     Из API Meteostat забирает json с погодой по городам из cities_geo. Затем записывает в базу.
-    :param target_date:
+    :param target_date: Дата, за которую собираются данные в формате YYYY-MM-DD.
     :return:
     """
-    # 1. Приоритет: если запускаем локально, то нужен .env.local
-    load_project_env()
-    # 2. Переменные соединения для записи в базу.
+    # 0. Грузим .env.local при локальном запуске.
+    load_project_env_if_locally()
+
+    # 1. Переменные соединения с api и соединения с базой.
     api_key = os.getenv("METEOSTAT_API_KEY")
-    pg_host = os.getenv("POSTGRES_DATA_HOST")        # имя хоста по месту запуска скрипта
+    if not api_key:
+        raise RuntimeError("API key не найден в environment.")
+    pg_host = os.getenv("POSTGRES_DATA_HOST")        # различается от места запуска
     pg_port = int(os.getenv("POSTGRES_DATA_PORT"))
-    pg_db = os.getenv("POSTGRES_DATA_DB")           # название БД
+    pg_db = os.getenv("POSTGRES_DATA_DB")
     pg_user = os.getenv("POSTGRES_DATA_USER")
     pg_pwd = os.getenv("POSTGRES_DATA_PASSWORD")
 
-    # 3. Формируем запрос api.
+    # 2. Формируем запрос api.
     base_url = "https://meteostat.p.rapidapi.com/point/daily"
     headers = {
         "x-rapidapi-key": api_key,
         "x-rapidapi-host": "meteostat.p.rapidapi.com"
     }
 
-    # 4. Открываем одно соединение для записи всех городов.
+    # 3. Открываем одно соединение для записи всех городов.
     with psycopg2.connect(
         host=pg_host,
         port=pg_port,
@@ -116,6 +117,7 @@ def extract_weather_raw_daily(target_date: str):
         password=pg_pwd
     ) as conn:
         # Цикл по имеющимся городам.
+        failed_cities = []  # для пропущенных городов
         for city_name, (lat, lon) in cities_geo.items():
             params = {
                 "lat": lat,
@@ -126,7 +128,7 @@ def extract_weather_raw_daily(target_date: str):
             }
             # Сохраняем ответ в память.
             response = requests.get(base_url, params=params, headers=headers, timeout=10)
-            failed_cities = []  # для пропущенных городов
+
 
             if response.status_code != 200:
                 print(f"{city_name} Ошибка API, {response.status_code}: {response.text}.")

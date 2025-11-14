@@ -5,7 +5,7 @@ from airflow import DAG
 from airflow.providers.http.sensors.http import HttpSensor
 from airflow.providers.common.sql.sensors.sql import SqlSensor
 from airflow.operators.python import PythonOperator, get_current_context
-from weather_raw_daily.extract import extract_weather_raw_daily
+from weather_daily.extract import extract_weather_raw_daily
 
 default_args = {
     "owner": "Orekhov_Anton",
@@ -35,7 +35,7 @@ def run_extract_weather_raw_daily():
     extract_weather_raw_daily(target_date)
 
 with DAG(
-    dag_id="weather_raw_daily_extract",
+    dag_id="weather_daily_extract",
     start_date=datetime(2025, 11, 10),
     schedule_interval="30 10 * * *",
     catchup=True,
@@ -74,7 +74,7 @@ with DAG(
     )
 
     extract_task = PythonOperator(
-        task_id="extract_weather_raw_daily",
+        task_id="extract_weather_daily",
         python_callable=run_extract_weather_raw_daily,
     )
 

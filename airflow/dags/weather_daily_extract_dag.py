@@ -4,8 +4,10 @@ from datetime import datetime, timedelta
 from airflow import DAG
 from airflow.providers.http.sensors.http import HttpSensor
 from airflow.providers.common.sql.sensors.sql import SqlSensor
-from airflow.operators.python import PythonOperator, get_current_context
-from weather_daily.extract import extract_weather_raw_daily
+from airflow.operators.python import PythonOperator
+from weather_daily.utils import get_target_date
+from weather_daily.extract import extract_weather_daily
+
 
 default_args = {
     "owner": "Orekhov_Anton",
@@ -15,24 +17,13 @@ default_args = {
 
 api_key = os.getenv("METEOSTAT_API_KEY")
 
-def get_target_date() -> str:
-    """
-    Возвращает logical_date в формате "YYYY-MM-DD"
-    :return: "2025-11-01"
-    """
-    context = get_current_context()
-    logical_date = context["logical_date"]  # pendulum DateTime
-    target_date = logical_date.date().isoformat()  # IDE не видит метода .date() к сожалению
-    print(f"target gate: {target_date}, type: {type(target_date)}")
-    return target_date
-
-def run_extract_weather_raw_daily():
+def run_extract_weather_daily():
     """
     Обертка для PythonOperator.
-     - берем target_date Airflow и передаем строку 'YYYY-MM-DD' в extract_weather_raw_daily
+     - берем target_date Airflow и передаем строку 'YYYY-MM-DD' в extract_weather_daily
     """
     target_date = get_target_date()
-    extract_weather_raw_daily(target_date)
+    extract_weather_daily(target_date)
 
 with DAG(
     dag_id="weather_daily_extract",
@@ -75,7 +66,7 @@ with DAG(
 
     extract_task = PythonOperator(
         task_id="extract_weather_daily",
-        python_callable=run_extract_weather_raw_daily,
+        python_callable=run_extract_weather_daily,
     )
 
     [check_api, check_db] >> extract_task
